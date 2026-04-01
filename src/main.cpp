@@ -3,6 +3,8 @@
 #include <Pixy2.h>
 #include <Servo.h>
 
+#define I2C_SLAVE_ADDR 0x08
+
 #define ENC_LEFT_A   4
 #define ENC_LEFT_B   5
 #define ENC_RIGHT_A  3
@@ -32,8 +34,34 @@
 volatile long leftCount = 0;
 volatile long rightCount = 0;
 
+volatile int i2c_speed_left = 0;
+volatile int i2c_speed_right = 0;
+volatile int i2c_steering_angle = CENTRE_ANGLE;
+volatile bool i2c_new_command = false;
+
 Servo steer_servo;
 Pixy2 pixy;
+
+void onReceive(int howMany) {
+  if (Wire.available() >= 3) {
+    char cmd = Wire.read();
+    byte val1 = Wire.read();
+    byte val2 = Wire.read();
+
+    if (cmd == 's') { // Speed command
+      i2c_speed_left = map(val1, 0, 255, -255, 255);
+      i2c_speed_right = map(val2, 0, 255, -255, 255);
+      i2c_new_command = true;
+    } else if (cmd == 't') { // Steering command
+      i2c_steering_angle = map(val1, 0, 255, MAX_LEFT, MAX_RIGHT);
+      i2c_new_command = true;
+    }
+  }
+  // Discard extra bytes
+  while (Wire.available() > 0) {
+    Wire.read();
+  }
+}
 
 void initPixy(){
   pixy.init();
@@ -123,6 +151,9 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(ENC_LEFT_A), leftEncoderISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_RIGHT_A), rightEncoderISR, CHANGE);
 
+  Wire.begin(I2C_SLAVE_ADDR);
+  Wire.onReceive(onReceive);
+
   steer_servo.attach(SERVO_PIN);
   steer(CENTRE_ANGLE);
 
@@ -135,6 +166,14 @@ void setup()
 
 void loop()
 {
+  if (i2c_new_command) {
+    run(i2c_speed_left, i2c_speed_right);
+    steer(i2c_steering_angle);
+    i2c_new_command = false;
+  }
+  // The existing line following code can be commented out or removed 
+  // if you want to control the robot only via I2C.
+  /*
   pixy.line.getMainFeatures();
   double angle = atan2(pixy.line.vectors[0].m_y1 - pixy.line.vectors[0].m_y0, pixy.line.vectors[0].m_x1 - pixy.line.vectors[0].m_x0) * 180.0 / PI;
   if (angle > 90) angle -= 180;
@@ -148,4 +187,5 @@ void loop()
     int steering_angle = map(angle, -70, 15, MAX_LEFT, CENTRE_ANGLE);
     steer(steering_angle);
   }
+  */
 }
