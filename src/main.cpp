@@ -55,6 +55,7 @@ volatile int i2c_speed_right = 0;
 volatile int i2c_steering_angle = CENTRE_ANGLE;
 volatile bool i2c_new_command = false;
 
+
 long readDistance()
 {
   digitalWrite(TRIG, LOW);
@@ -374,13 +375,13 @@ float applyCorrection(const Vector *vectors, uint8_t numVectors, float targetSte
       {
         // Small turn to the right
         correction = 15.0f;
-        Serial.printf("Small turn RIGHT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
+        //Serial.printf("Small turn RIGHT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
       }
       else if (mainVectorCenterX >= 40.0f && mainVectorCenterX <= 60.0f)
       {
         // Small turn to the left
         correction = -15.0f;
-        Serial.printf("Small turn LEFT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
+        //Serial.printf("Small turn LEFT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
       }
 
       targetSteering = constrain(targetSteering + correction, MAX_LEFT, MAX_RIGHT);
@@ -443,15 +444,69 @@ void stopBox(){
   // Stop distance need some tuning bech tji bel dhabt
   #define STOP_DISTANCE 30
   long distance = readDistanceFiltered();
-  Serial.printf("Distance: %ld\n", distance);
+  //Serial.printf("Distance: %ld\n", distance);
   if(distance < STOP_DISTANCE){
     run(0,0);
-    Serial.println("Object detected, stopping");
+    //Serial.println("Object detected, stopping");
     while(true);
   }
 }
 
 bool finishLineDetected = false;
+
+struct Point { float x, y; };
+
+int identifyCase(Vector v1, Vector v2) {
+    Point p1a = {(float)v1.m_x0, (float)v1.m_y0};
+    Point p1b = {(float)v1.m_x1, (float)v1.m_y1};
+    Point p2a = {(float)v2.m_x0, (float)v2.m_y0};
+    Point p2b = {(float)v2.m_x1, (float)v2.m_y1};
+
+    auto distSq = [](Point a, Point b) { 
+        return std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2); 
+    };
+
+    // Find which two ends are the corner
+    float d00 = distSq(p1a, p2a);
+    float d01 = distSq(p1a, p2b);
+    float d10 = distSq(p1b, p2a);
+    float d11 = distSq(p1b, p2b);
+
+    Point corner, far1, far2;
+    float minDist = std::min({d00, d01, d10, d11});
+
+    if (minDist == d00) { corner = p1a; far1 = p1b; far2 = p2b; }
+    else if (minDist == d01) { corner = p1a; far1 = p1b; far2 = p2a; }
+    else if (minDist == d10) { corner = p1b; far1 = p1a; far2 = p2b; }
+    else { corner = p1b; far1 = p1a; far2 = p2a; }
+
+    // Create vectors pointing AWAY from the corner
+    float dir1x = far1.x - corner.x;
+    float dir1y = far1.y - corner.y;
+    float dir2x = far2.x - corner.x;
+    float dir2y = far2.y - corner.y;
+
+    // Normalize them to give them equal weight
+    float mag1 = std::sqrt(dir1x*dir1x + dir1y*dir1y);
+    float mag2 = std::sqrt(dir2x*dir2x + dir2y*dir2y);
+    
+    if (mag1 < 0.1f || mag2 < 0.1f) return 0; // Avoid division by zero
+
+    // Resultant vector points into the "open" part of the corner
+    float resX = (dir1x / mag1) + (dir2x / mag2);
+    float resY = (dir1y / mag1) + (dir2y / mag2);
+
+    #define TOP_LEFT_CORNER 1
+    #define TOP_RIGHT_CORNER 2
+    #define BOTTOM_LEFT_CORNER 3
+    #define BOTTOM_RIGHT_CORNER 4
+    if (resX < 0 && resY < 0) return TOP_LEFT_CORNER; // TOP LEFT CORNER
+    if (resX > 0 && resY < 0) return TOP_RIGHT_CORNER; // TOP RIGHT CORNER
+    if (resX < 0 && resY > 0) return BOTTOM_LEFT_CORNER; // BOTTOM LEFT CORNER
+    if (resX > 0 && resY > 0) return BOTTOM_RIGHT_CORNER; // BOTTOM RIGHT CORNER
+
+    return 0;
+}
 
 void firasLogic(){
   Vector vectors[MAX_VECTORS];
@@ -459,7 +514,7 @@ void firasLogic(){
   Vector horizontalVectors[MAX_VECTORS];
   uint8_t numHorizontalVectors = 0;
   pixy.line.getAllFeatures();
-  Serial.printf("Detected %d vectors\n", pixy.line.numVectors);
+  //Serial.printf("Detected %d vectors\n", pixy.line.numVectors);
   for (uint8_t i = 0; i < pixy.line.numVectors; i++)
   {
     float angle = computeAngle(pixy.line.vectors[i]);
@@ -474,7 +529,7 @@ void firasLogic(){
     if(isHorizontalAngle(angle) && length < 15.0f){
       horizontalVectors[numHorizontalVectors] = pixy.line.vectors[i];
       numHorizontalVectors++;
-      Serial.printf("Horizontal Vector %d: Angle=%.2f, Length=%.2f, x0=%d, y0=%d, x1=%d, y1=%d\n", i, angle, length, x0, y0, x1, y1);
+      //Serial.printf("Horizontal Vector %d: Angle=%.2f, Length=%.2f, x0=%d, y0=%d, x1=%d, y1=%d\n", i, angle, length, x0, y0, x1, y1);
     }
 
     if (numVectors < MAX_VECTORS
@@ -499,7 +554,7 @@ void firasLogic(){
     // if les Y mte3hom ykounou 9ribin mel baadhhom (within 5 pixels), n3etberou finish line detected, w nkamlo douga douga
     if(fabs(avgY_vec1 - avgY_vec2) <= 5.0f){
       Serial.println("Finish line detected!");
-      run(130,130);
+      //run(130,130);
       finishLineDetected = true;
     }
   }
@@ -519,9 +574,6 @@ void firasLogic(){
   }
   else if (numVectors >= 2)
   {
-    float angle1 = computeAngle(vectors[0]);
-    float angle2 = computeAngle(vectors[1]);
-    
     // kana fama angle 90 binet les deux vecteurs, bech nwaslou l goddam (most likely fama intersection)
     float angleBetweenVectors = computeAngleBetweenVectors(vectors[0], vectors[1]);
     if ((abs(angleBetweenVectors) > 70 && abs(angleBetweenVectors) < 110))
@@ -530,6 +582,19 @@ void firasLogic(){
       #define CROSS_CORRECTION_ANGLE 15.0f
       float correction_based_on_side = (avg_x < 40.0f) ? CROSS_CORRECTION_ANGLE : ((avg_x > 40.0f) ? - CROSS_CORRECTION_ANGLE : 0.0f); // nal3bou 3la el valeur 15???
       targetSteering = CENTRE_ANGLE + correction_based_on_side;
+      int caseIntersection = identifyCase(vectors[0], vectors[1]);
+      if(caseIntersection == TOP_LEFT_CORNER){
+        Serial.println("Case: TOP LEFT CORNER");
+      }
+      else if(caseIntersection == TOP_RIGHT_CORNER){
+        Serial.println("Case: TOP RIGHT CORNER");
+      }
+      else if(caseIntersection == BOTTOM_LEFT_CORNER){
+        Serial.println("Case: BOTTOM LEFT CORNER");
+      }
+      else if(caseIntersection == BOTTOM_RIGHT_CORNER){
+        Serial.println("Case: BOTTOM RIGHT CORNER");
+      }
     }
     // mafamch intersection
     else
@@ -603,7 +668,8 @@ void setup()
 
   digitalWrite(LED, HIGH);
 
-  run(150, 150);
+  //run(150, 150);
+  run(0, 0);
   startTime = millis();
 }
 void loop()
