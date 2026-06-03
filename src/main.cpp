@@ -3,19 +3,8 @@
 #include <Servo.h>
 #include <Wire.h>
 
-// CAMERA MAX X AND Y
-// Max X0: 78, Max Y0: 51, Max X1: 78, Max Y1: 51
-
-unsigned long startTime = 0;
-constexpr uint8_t I2C_SLAVE_ADDR = 0x08;
-
 #define MAX_VECTORS 20
 #define MIN_VECTOR_LENGTH 10
-
-#define ENC_LEFT_A 4
-#define ENC_LEFT_B 5
-#define ENC_RIGHT_A 3
-#define ENC_RIGHT_B 2
 
 #define PWM1 8
 #define IN1 6
@@ -33,12 +22,21 @@ constexpr uint8_t I2C_SLAVE_ADDR = 0x08;
 #define MAX_RIGHT CENTRE_ANGLE + 45
 #define MAX_LEFT CENTRE_ANGLE - 45
 
+#define STOP_DISTANCE 15
+
+#define TOP_LEFT_CORNER 1
+#define TOP_RIGHT_CORNER 2
+#define BOTTOM_LEFT_CORNER 3
+#define BOTTOM_RIGHT_CORNER 4
+
+#define CROSS_CORRECTION_ANGLE 15.0f
+
 constexpr float PIXY_FORWARD_ANGLE = 270.0;
-constexpr float PIXY_STEER_DEADBAND = 15.0; // 10 old
-constexpr uint8_t STEERING_DELAY_CYCLES = 2; // parfait
+constexpr float PIXY_STEER_DEADBAND = 15.0;
+constexpr uint8_t STEERING_DELAY_CYCLES = 2;
 constexpr float STEERING_QUEUE_THRESHOLD = 2.0;
 constexpr float STEERING_CENTER_BIAS = 5.0;
-constexpr float STEERING_SOFT_LIMIT_START = 15.0; // 25.0: cross mrigl, zigzag non;;; 15.0 corss non, zigzag mrigl;;; 20.0: 50% 50% sa3et yed5m mrigl sa3et le
+constexpr float STEERING_SOFT_LIMIT_START = 11.0;
 constexpr float STEERING_SOFT_LIMIT_FACTOR = 0.5;
 
 Servo steer_servo;
@@ -47,14 +45,9 @@ static float lastSteeringAngle = CENTRE_ANGLE;
 static float pendingSteeringAngle = CENTRE_ANGLE;
 static uint8_t steeringDelayCounter = 0;
 
-volatile long leftCount = 0;
-volatile long rightCount = 0;
+bool finishLineDetected = false;
 
-volatile int i2c_speed_left = 0;
-volatile int i2c_speed_right = 0;
-volatile int i2c_steering_angle = CENTRE_ANGLE;
-volatile bool i2c_new_command = false;
-
+unsigned long startTime;
 
 long readDistance()
 {
@@ -89,30 +82,6 @@ long readDistanceFiltered()
   }
 
   return sum / numReadings;
-}
-
-void leftEncoderISR()
-{
-  if (digitalReadFast(ENC_LEFT_B) == digitalReadFast(ENC_LEFT_A))
-  {
-    leftCount++;
-  }
-  else
-  {
-    leftCount--;
-  }
-}
-
-void rightEncoderISR()
-{
-  if (digitalReadFast(ENC_RIGHT_B) == digitalReadFast(ENC_RIGHT_A))
-  {
-    rightCount++;
-  }
-  else
-  {
-    rightCount--;
-  }
 }
 
 void initPixy()
@@ -157,61 +126,6 @@ void run(int speedLeft, int speedRight)
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
   }
-}
-
-void onReceive(int howMany)
-{
-  if (howMany < 3)
-  {
-    while (Wire1.available() > 0)
-    {
-      Wire1.read();
-    }
-    return;
-  }
-
-  const char cmd = static_cast<char>(Wire1.read());
-  const uint8_t val1 = Wire1.read();
-  const uint8_t val2 = Wire1.read();
-
-  if (cmd == 's')
-  {
-    i2c_speed_left = map(val1, 0, 255, -255, 255);
-    i2c_speed_right = map(val2, 0, 255, -255, 255);
-    i2c_new_command = true;
-  }
-  else if (cmd == 't')
-  {
-    i2c_steering_angle = map(val1, 0, 255, MAX_LEFT, MAX_RIGHT);
-    i2c_new_command = true;
-  }
-
-  while (Wire1.available() > 0)
-  {
-    Wire1.read();
-  }
-}
-
-void communication_setup()
-{
-  Wire1.begin(I2C_SLAVE_ADDR);
-  Wire1.onReceive(onReceive);
-}
-
-void communication_loop()
-{
-  if (!i2c_new_command)
-  {
-    return;
-  }
-
-  Serial.printf("Received:\n Speed Left: %d Right: %d Angle: %d\n",
-                i2c_speed_left,
-                i2c_speed_right,
-                i2c_steering_angle);
-  run(i2c_speed_left, i2c_speed_right);
-  steer(i2c_steering_angle);
-  i2c_new_command = false;
 }
 
 float computeAngle(const Vector &vec)
@@ -273,11 +187,6 @@ float angleDelta(float from, float to)
 
 float computeSteeringAngle(const Vector *vectors, uint8_t numVectors)
 {
-  if (numVectors == 0)
-  {
-    return lastSteeringAngle;
-  }
-
   float weightedDelta = 0.0;
   float totalWeight = 0.0;
 
@@ -348,21 +257,6 @@ void sortVectorsByLength(Vector *vectors, uint8_t numVectors)
   }
 }
 
-void printSortedVectors(Vector *vectors, uint8_t numVectors)
-{
-  for (uint8_t i = 0; i < numVectors; i++)
-  {
-    float angle = computeAngle(vectors[i]);
-    float length = computeLength(vectors[i]);
-    int x0 = vectors[i].m_x0;
-    int y0 = vectors[i].m_y0;
-    int x1 = vectors[i].m_x1;
-    int y1 = vectors[i].m_y1;
-    Serial.printf("Sorted Vector %d: Angle=%.2f, Length=%.2f, x0=%d, y0=%d, x1=%d, y1=%d\n", i, angle, length, x0, y0, x1, y1);
-  }
-  Serial.println("---------------------------------------------------------------");
-}
-
 float applyCorrection(const Vector *vectors, uint8_t numVectors, float targetSteering)
 {
  if (numVectors == 1)
@@ -373,31 +267,17 @@ float applyCorrection(const Vector *vectors, uint8_t numVectors, float targetSte
       float correction = 0.0f;
       if (mainVectorCenterX >= 20.0f && mainVectorCenterX < 40.0f)
       {
-        // Small turn to the right
-        correction = 15.0f;
-        //Serial.printf("Small turn RIGHT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
+        correction = 15.0f; // Small turn to the right
       }
       else if (mainVectorCenterX >= 40.0f && mainVectorCenterX <= 60.0f)
-      {
-        // Small turn to the left
-        correction = -15.0f;
-        //Serial.printf("Small turn LEFT: mainVectorCenterX=%.1f\n", mainVectorCenterX);
+      { 
+        correction = -15.0f; // Small turn to the left
       }
 
       targetSteering = constrain(targetSteering + correction, MAX_LEFT, MAX_RIGHT);
     }
   }
   return targetSteering;
-}
-
-Vector sumVector(const Vector &v1, const Vector &v2)
-{
-  Vector result;
-  result.m_x0 = v1.m_x0 + v2.m_x0;
-  result.m_y0 = v1.m_y0 + v2.m_y0;
-  result.m_x1 = v1.m_x1 + v2.m_x1;
-  result.m_y1 = v1.m_y1 + v2.m_y1;
-  return result;
 }
 
 float dotProduct(const Vector &v1, const Vector &v2)
@@ -416,47 +296,20 @@ float computeAngleBetweenVectors(const Vector &v1, const Vector &v2)
   return acos(cosTheta) * 180.0 / PI;
 }
 
-int maxX0 = 0;
-int maxY0 = 0;
-int maxX1 = 0;
-int maxY1 = 0;
-void findMaxXandMaxY(){
-  pixy.line.getAllFeatures();
-  for(int i=0; i<pixy.line.numVectors; i++){
-    if(pixy.line.vectors[i].m_x0 > maxX0){
-      maxX0 = pixy.line.vectors[i].m_x0;
-    }
-    if(pixy.line.vectors[i].m_y0 > maxY0){
-      maxY0 = pixy.line.vectors[i].m_y0;
-    }
-    if(pixy.line.vectors[i].m_x1 > maxX1){
-      maxX1 = pixy.line.vectors[i].m_x1;
-    }
-    if(pixy.line.vectors[i].m_y1 > maxY1){
-      maxY1 = pixy.line.vectors[i].m_y1;
-    }
-  }
-  Serial.printf("Max X0: %d, Max Y0: %d, Max X1: %d, Max Y1: %d\n", maxX0, maxY0, maxX1, maxY1);
-}
-
-
 void stopBox(){
-  // Stop distance need some tuning bech tji bel dhabt
-  #define STOP_DISTANCE 30
+  
   long distance = readDistanceFiltered();
-  //Serial.printf("Distance: %ld\n", distance);
   if(distance < STOP_DISTANCE){
+    run(-100,-100);
+    delay(200);
     run(0,0);
-    //Serial.println("Object detected, stopping");
     while(true);
   }
 }
 
-bool finishLineDetected = false;
-
-struct Point { float x, y; };
-
 int identifyCase(Vector v1, Vector v2) {
+    struct Point { float x, y; };
+
     Point p1a = {(float)v1.m_x0, (float)v1.m_y0};
     Point p1b = {(float)v1.m_x1, (float)v1.m_y1};
     Point p2a = {(float)v2.m_x0, (float)v2.m_y0};
@@ -496,32 +349,42 @@ int identifyCase(Vector v1, Vector v2) {
     float resX = (dir1x / mag1) + (dir2x / mag2);
     float resY = (dir1y / mag1) + (dir2y / mag2);
 
-    #define TOP_LEFT_CORNER 1
-    #define TOP_RIGHT_CORNER 2
-    #define BOTTOM_LEFT_CORNER 3
-    #define BOTTOM_RIGHT_CORNER 4
-    if (resX < 0 && resY < 0) return TOP_LEFT_CORNER; // TOP LEFT CORNER
-    if (resX > 0 && resY < 0) return TOP_RIGHT_CORNER; // TOP RIGHT CORNER
-    if (resX < 0 && resY > 0) return BOTTOM_LEFT_CORNER; // BOTTOM LEFT CORNER
-    if (resX > 0 && resY > 0) return BOTTOM_RIGHT_CORNER; // BOTTOM RIGHT CORNER
+    
+    if (resX < 0 && resY < 0) return TOP_LEFT_CORNER;
+    if (resX > 0 && resY < 0) return TOP_RIGHT_CORNER;
+    if (resX < 0 && resY > 0) return BOTTOM_LEFT_CORNER;
+    if (resX > 0 && resY > 0) return BOTTOM_RIGHT_CORNER;
 
     return 0;
 }
 
-void firasLogic(){
+int computeSteeringAngleIntersection(const Vector &v1, const Vector &v2)
+{
+  float avg_x = (v1.m_x0 + v1.m_x1 + v2.m_x0 + v2.m_x1) / 4.0f;
+  float correction_based_on_side = (avg_x < 40.0f) ? CROSS_CORRECTION_ANGLE : ((avg_x > 40.0f) ? - CROSS_CORRECTION_ANGLE : 0.0f); 
+  float targetSteering = CENTRE_ANGLE + correction_based_on_side;
+  int caseIntersection = identifyCase(v1, v2);
+  float caseCorrection = 10.0f;
+  if(caseIntersection == TOP_LEFT_CORNER || caseIntersection == BOTTOM_LEFT_CORNER){
+    targetSteering += caseCorrection;
+  }
+  else if(caseIntersection == BOTTOM_RIGHT_CORNER || caseIntersection == TOP_RIGHT_CORNER){
+    targetSteering -= caseCorrection;
+  }
+  return constrain(targetSteering, MAX_LEFT, MAX_RIGHT);
+}
+
+void runNXP(){
   Vector vectors[MAX_VECTORS];
   uint8_t numVectors = 0;
   Vector horizontalVectors[MAX_VECTORS];
   uint8_t numHorizontalVectors = 0;
   pixy.line.getAllFeatures();
-  //Serial.printf("Detected %d vectors\n", pixy.line.numVectors);
   for (uint8_t i = 0; i < pixy.line.numVectors; i++)
   {
     float angle = computeAngle(pixy.line.vectors[i]);
     float length = computeLength(pixy.line.vectors[i]);
-    int x0 = pixy.line.vectors[i].m_x0;
     int y0 = pixy.line.vectors[i].m_y0;
-    int x1 = pixy.line.vectors[i].m_x1;
     int y1 = pixy.line.vectors[i].m_y1;
     float avgY = (y0 + y1) / 2.0f;
 
@@ -529,7 +392,6 @@ void firasLogic(){
     if(isHorizontalAngle(angle) && length < 15.0f){
       horizontalVectors[numHorizontalVectors] = pixy.line.vectors[i];
       numHorizontalVectors++;
-      //Serial.printf("Horizontal Vector %d: Angle=%.2f, Length=%.2f, x0=%d, y0=%d, x1=%d, y1=%d\n", i, angle, length, x0, y0, x1, y1);
     }
 
     if (numVectors < MAX_VECTORS
@@ -553,9 +415,8 @@ void firasLogic(){
     float avgY_vec2 = (horizontalVectors[1].m_y0 + horizontalVectors[1].m_y1) / 2.0f;
     // if les Y mte3hom ykounou 9ribin mel baadhhom (within 5 pixels), n3etberou finish line detected, w nkamlo douga douga
     if(fabs(avgY_vec1 - avgY_vec2) <= 5.0f){
-      Serial.println("Finish line detected!");
-      run(130,130);
       finishLineDetected = true;
+      run(130,130);
     }
   }
 
@@ -574,32 +435,11 @@ void firasLogic(){
   }
   else if (numVectors >= 2)
   {
-    // kana fama angle 90 binet les deux vecteurs, bech nwaslou l goddam (most likely fama intersection)
+    // kana fama angle 90 (presque) binet les deux vecteurs, bech nwaslou l goddam (most likely fama intersection)
     float angleBetweenVectors = computeAngleBetweenVectors(vectors[0], vectors[1]);
     if ((abs(angleBetweenVectors) > 70 && abs(angleBetweenVectors) < 110))
     {
-      float avg_x = (vectors[0].m_x0 + vectors[0].m_x1 + vectors[1].m_x0 + vectors[1].m_x1) / 4.0f;
-      #define CROSS_CORRECTION_ANGLE 15.0f
-      float correction_based_on_side = (avg_x < 40.0f) ? CROSS_CORRECTION_ANGLE : ((avg_x > 40.0f) ? - CROSS_CORRECTION_ANGLE : 0.0f); // nal3bou 3la el valeur 15???
-      targetSteering = CENTRE_ANGLE + correction_based_on_side;
-      int caseIntersection = identifyCase(vectors[0], vectors[1]);
-      int caseCorrection = 10.0f;
-      if(caseIntersection == TOP_LEFT_CORNER){
-        //Serial.println("Case: TOP LEFT CORNER");
-        targetSteering += caseCorrection;
-      }
-      else if(caseIntersection == TOP_RIGHT_CORNER){
-        //Serial.println("Case: TOP RIGHT CORNER");
-        targetSteering -= caseCorrection;
-      }
-      else if(caseIntersection == BOTTOM_LEFT_CORNER){
-        //Serial.println("Case: BOTTOM LEFT CORNER");
-        targetSteering += caseCorrection;
-      }
-      else if(caseIntersection == BOTTOM_RIGHT_CORNER){
-        //Serial.println("Case: BOTTOM RIGHT CORNER");
-        targetSteering -= caseCorrection;
-      }
+      targetSteering = computeSteeringAngleIntersection(vectors[0], vectors[1]);
     }
     // mafamch intersection
     else
@@ -635,13 +475,8 @@ void firasLogic(){
   }
 }
 
-
 void setup()
 {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("Serial monitor ready at 115200");
-
   analogWriteResolution(8);
   analogWriteFrequency(PWM1, 20000);
   analogWriteFrequency(PWM2, 20000);
@@ -658,14 +493,6 @@ void setup()
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
 
-  pinMode(ENC_LEFT_A, INPUT_PULLUP);
-  pinMode(ENC_LEFT_B, INPUT_PULLUP);
-  pinMode(ENC_RIGHT_A, INPUT_PULLUP);
-  pinMode(ENC_RIGHT_B, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(ENC_LEFT_A), leftEncoderISR, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_RIGHT_A), rightEncoderISR, CHANGE);
-
   steer_servo.attach(SERVO_PIN);
   steer(CENTRE_ANGLE);
 
@@ -674,10 +501,10 @@ void setup()
   digitalWrite(LED, HIGH);
 
   run(150, 150);
-  //run(0, 0);
   startTime = millis();
 }
+
 void loop()
 {
-  firasLogic();
+  runNXP();
 }
